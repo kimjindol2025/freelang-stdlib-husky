@@ -1,0 +1,361 @@
+/**
+ * FreeLang v2 stdlib — husky.fl
+ *
+ * npm husky 완전 대체 (외부 npm 0개)
+ * Git hooks 자동 설치/관리
+ *
+ * 지원 hooks:
+ *   pre-commit       — 커밋 직전 실행
+ *   commit-msg       — 커밋 메시지 검증 ($1 = 메시지 파일 경로)
+ *   pre-push         — push 직전 실행
+ *   post-merge       — merge 완료 후 실행
+ *   post-checkout    — checkout 완료 후 실행
+ *   pre-rebase       — rebase 직전 실행
+ *   prepare-commit-msg — 커밋 메시지 편집기 실행 전
+ *   post-commit      — 커밋 완료 후 실행
+ *   pre-receive      — 서버: 수신 직전
+ *   update           — 서버: 레퍼런스 갱신 전
+ *
+ * 사용 예시:
+ *   import "husky"
+ *
+ *   // 프로젝트 초기화 (1회)
+ *   install(".husky")
+ *
+ *   // hook 추가
+ *   add("pre-commit", "fl lint.fl && fl test.fl")
+ *   add("commit-msg", "fl commitlint.fl $1")
+ *   add("pre-push",   "fl test.fl --coverage")
+ *
+ *   // hook 제거
+ *   remove("pre-push")
+ *
+ *   // 목록 조회
+ *   let hooks = list()
+ *
+ *   // 독립 실행 (package.json 없이)
+ *   init()
+ *
+ * hooks 설치 구조:
+ *   .husky/
+ *     pre-commit    (실행권한 +x)
+ *     commit-msg    (실행권한 +x)
+ *     pre-push      (실행권한 +x)
+ *   .git/config → core.hooksPath = .husky
+ *
+ * 네이티브 함수 (src/stdlib-husky.ts):
+ *   husky_install(hooksDir, gitDir)         → bool
+ *   husky_add(hooksDir, hook, cmd)          → bool
+ *   husky_remove(hooksDir, hook)            → bool
+ *   husky_list(hooksDir)                    → array
+ *   husky_exists(hooksDir, hook)            → bool
+ *   husky_read(hooksDir, hook)              → string
+ *   husky_run(hooksDir, hook, args)         → int (exit code)
+ *   husky_set_git_config(gitDir, hooksDir)  → bool
+ *   husky_unset_git_config(gitDir)          → bool
+ *   husky_find_git_dir(projectDir)          → string
+ */
+
+// ============================================
+// ANSI 색상
+// ============================================
+
+let HUSKY_GREEN  = "\033[32m"
+let HUSKY_YELLOW = "\033[33m"
+let HUSKY_RED    = "\033[31m"
+let HUSKY_CYAN   = "\033[36m"
+let HUSKY_BOLD   = "\033[1m"
+let HUSKY_RESET  = "\033[0m"
+
+// ============================================
+// 지원 hooks 목록
+// ============================================
+
+let VALID_HOOKS = [
+  "pre-commit",
+  "commit-msg",
+  "pre-push",
+  "post-merge",
+  "post-checkout",
+  "pre-rebase",
+  "prepare-commit-msg",
+  "post-commit",
+  "pre-receive",
+  "update"
+]
+
+// ============================================
+// 모듈 상태 (install() 후 유지)
+// ============================================
+
+let _huskyDir = ".husky"
+let _gitDir   = ".git"
+
+// ============================================
+// HuskyConfig — 초기화 설정
+// ============================================
+
+struct HuskyConfig {
+  hooksDir: string,        // hook 스크립트 저장 디렉토리 (기본: ".husky")
+  gitDir: string,          // .git 디렉토리 경로 (기본: ".git")
+  shell: string,           // hook 스크립트 인터프리터 (기본: "/bin/sh")
+  verbose: bool            // 설치 과정 로그 출력
+}
+
+// ============================================
+// HuskyHook — 개별 hook 정보
+// ============================================
+
+struct HuskyHook {
+  name: string,            // hook 이름 (예: "pre-commit")
+  cmd: string,             // 실행 명령어
+  installed: bool          // 실제 파일로 설치됐는지 여부
+}
+
+// ============================================
+// log — 내부 로그 헬퍼
+// ============================================
+
+fn log(msg: string) -> void {
+  println(HUSKY_GREEN + "husky" + HUSKY_RESET + " - " + msg)
+}
+
+fn logWarn(msg: string) -> void {
+  println(HUSKY_YELLOW + "husky" + HUSKY_RESET + " - " + msg)
+}
+
+fn logError(msg: string) -> void {
+  println(HUSKY_RED + "husky - error:" + HUSKY_RESET + " " + msg)
+}
+
+// ============================================
+// isValidHook — hook 이름 유효성 검사
+// ============================================
+
+fn isValidHook(hookName: string) -> bool {
+  let i = 0
+  while (i < arr.length(VALID_HOOKS)) {
+    if (VALID_HOOKS[i] == hookName) {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+// ============================================
+// install — .husky/ 디렉토리 초기화
+//           git config core.hooksPath 설정
+//
+// 예시:
+//   install(".husky")
+// ============================================
+
+fn install(hooksDir: string) -> void {
+  let dir = hooksDir || ".husky"
+  let gitDir = husky_find_git_dir(".")
+
+  if (gitDir == "") {
+    logError("Git 저장소를 찾을 수 없습니다 (.git 없음)")
+    return
+  }
+
+  let ok = husky_install(dir, gitDir)
+  if (!ok) {
+    logError(dir + " 디렉토리 생성 실패")
+    return
+  }
+
+  // git config core.hooksPath 설정
+  let configured = husky_set_git_config(gitDir, dir)
+  if (!configured) {
+    logWarn("git config core.hooksPath 설정 실패 — 수동으로 설정하세요")
+  }
+
+  // 모듈 상태 갱신
+  _huskyDir = dir
+  _gitDir   = gitDir
+
+  log("Git hooks 초기화 완료: " + dir)
+  log("git config core.hooksPath = " + dir)
+}
+
+// ============================================
+// add — hook 스크립트 추가/갱신
+//
+// 예시:
+//   add("pre-commit", "fl lint.fl && fl test.fl")
+//   add("commit-msg", "fl commitlint.fl $1")
+//   add("pre-push",   "fl test.fl --coverage")
+// ============================================
+
+fn add(hook: string, cmd: string) -> void {
+  if (!isValidHook(hook)) {
+    logError("지원하지 않는 hook: " + hook)
+    logError("지원 목록: " + arr.join(VALID_HOOKS, ", "))
+    return
+  }
+
+  if (cmd == "") {
+    logError("명령어가 비어 있습니다")
+    return
+  }
+
+  let ok = husky_add(_huskyDir, hook, cmd)
+  if (!ok) {
+    logError(hook + " hook 설치 실패")
+    return
+  }
+
+  log("hook 추가: " + _huskyDir + "/" + hook)
+  log("  명령: " + cmd)
+}
+
+// ============================================
+// remove — hook 스크립트 제거
+//
+// 예시:
+//   remove("pre-push")
+// ============================================
+
+fn remove(hook: string) -> void {
+  if (!husky_exists(_huskyDir, hook)) {
+    logWarn(hook + " hook이 설치되지 않아 건너뜁니다")
+    return
+  }
+
+  let ok = husky_remove(_huskyDir, hook)
+  if (!ok) {
+    logError(hook + " hook 제거 실패")
+    return
+  }
+
+  log("hook 제거: " + hook)
+}
+
+// ============================================
+// list — 설치된 hooks 목록 반환
+// ============================================
+
+fn list() -> array {
+  return husky_list(_huskyDir)
+}
+
+// ============================================
+// exists — hook 설치 여부 확인
+// ============================================
+
+fn exists(hook: string) -> bool {
+  return husky_exists(_huskyDir, hook)
+}
+
+// ============================================
+// read — hook 스크립트 내용 읽기
+// ============================================
+
+fn read(hook: string) -> string {
+  if (!husky_exists(_huskyDir, hook)) {
+    return ""
+  }
+  return husky_read(_huskyDir, hook)
+}
+
+// ============================================
+// run — hook 수동 실행 (테스트용)
+//
+// 반환값: exit code (0 = 성공)
+// ============================================
+
+fn run(hook: string) -> int {
+  if (!husky_exists(_huskyDir, hook)) {
+    logError(hook + " hook이 설치되지 않았습니다")
+    return 1
+  }
+
+  log("수동 실행: " + hook)
+  let code = husky_run(_huskyDir, hook, [])
+  if (code == 0) {
+    log(hook + " 완료 (exit 0)")
+  } else {
+    logError(hook + " 실패 (exit " + str(code) + ")")
+  }
+  return code
+}
+
+// ============================================
+// runWithArgs — 인자 포함 hook 실행 (commit-msg 등)
+// ============================================
+
+fn runWithArgs(hook: string, args: array) -> int {
+  if (!husky_exists(_huskyDir, hook)) {
+    logError(hook + " hook이 설치되지 않았습니다")
+    return 1
+  }
+  return husky_run(_huskyDir, hook, args)
+}
+
+// ============================================
+// init — package.json 없이 독립 실행 초기화
+//        기본 .husky 디렉토리 + git config 설정
+// ============================================
+
+fn init() -> void {
+  log("husky 초기화 시작 (package.json 없이 동작)")
+  install(".husky")
+  log("초기화 완료. hooks 추가 예시:")
+  log("  add(\"pre-commit\", \"freelang test.fl\")")
+  log("  add(\"pre-push\",   \"freelang test.fl --coverage\")")
+}
+
+// ============================================
+// uninstall — git config 초기화 + hooks 제거
+// ============================================
+
+fn uninstall() -> void {
+  let gitDir = husky_find_git_dir(".")
+  if (gitDir != "") {
+    husky_unset_git_config(gitDir)
+    log("git config core.hooksPath 제거 완료")
+  }
+
+  let installed = list()
+  let i = 0
+  while (i < arr.length(installed)) {
+    remove(installed[i])
+    i = i + 1
+  }
+
+  log("husky 제거 완료")
+}
+
+// ============================================
+// setDir — 모듈 상태 수동 설정
+//           (다른 hooksDir 사용할 때)
+// ============================================
+
+fn setDir(hooksDir: string) -> void {
+  _huskyDir = hooksDir
+  log("hooksDir 변경: " + hooksDir)
+}
+
+// ============================================
+// status — 현재 설치 상태 출력
+// ============================================
+
+fn status() -> void {
+  let hooks = list()
+  println(HUSKY_BOLD + "husky 상태" + HUSKY_RESET)
+  println("  hooksDir: " + _huskyDir)
+  println("  gitDir:   " + _gitDir)
+  println("  설치된 hooks (" + str(arr.length(hooks)) + "개):")
+  let i = 0
+  while (i < arr.length(hooks)) {
+    let hookName = hooks[i]
+    let content  = read(hookName)
+    println("    " + HUSKY_GREEN + "✓" + HUSKY_RESET + " " + hookName + ": " + content)
+    i = i + 1
+  }
+  if (arr.length(hooks) == 0) {
+    println("    (없음)")
+  }
+}
